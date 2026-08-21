@@ -57,6 +57,17 @@ function parisTime(date = new Date()) {
   }).format(date);
 }
 
+function timeAgo(date) {
+  const now = new Date();
+  const diff = Math.floor((now - date) / 1000); // seconds
+  
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
+  return `${Math.floor(diff / 2592000)}mo ago`;
+}
+
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(config.token);
   await rest.put(
@@ -91,7 +102,11 @@ function pathFile(target, paths) {
     ''
   ].join('\n');
 
-  const body = paths.map(item => item.url).join('\n');
+  const body = paths.map(item => {
+    const age = item.discoveredAt ? timeAgo(new Date(item.discoveredAt)) : 'unknown';
+    return `${item.url} (${age})`;
+  }).join('\n');
+  
   return Buffer.from(`${header}${body}\n`, 'utf8');
 }
 
@@ -102,7 +117,8 @@ async function sendResults(target, results) {
   const lines = results.slice(0, 20).map(result => {
     const icon = result.type === 'new' ? '🆕' : '🟠';
     const label = result.type === 'new' ? 'New path' : 'Path changed';
-    return `${icon} **${label}** — <${result.url}> (${result.status ?? 'unknown'})`;
+    const age = result.discoveredAt ? timeAgo(new Date(result.discoveredAt)) : 'just now';
+    return `${icon} **${label}** — <${result.url}> (${result.status ?? 'unknown'}, ${age})`;
   });
 
   const mention = config.alertRoleId ? `<@&${config.alertRoleId}> ` : '';
