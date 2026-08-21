@@ -48,6 +48,15 @@ export const commands = [
     .setDescription('Check all monitored targets now')
 ].map(command => command.toJSON());
 
+function parisTime(date = new Date()) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Paris',
+    dateStyle: 'full',
+    timeStyle: 'medium',
+    hour12: false
+  }).format(date);
+}
+
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(config.token);
   await rest.put(
@@ -75,7 +84,7 @@ function pathFile(target, paths) {
   const header = [
     `URL path scan for ${target.name}`,
     `Base URL: ${target.url}`,
-    `Generated: ${new Date().toISOString()}`,
+    `Generated: ${parisTime()}`,
     `Total paths: ${paths.length}`,
     '',
     'Paths:',
