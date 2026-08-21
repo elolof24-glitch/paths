@@ -6,22 +6,29 @@ import { discoverPublicPaths } from './discovery.js';
 const MAX_PAGES = 100;
 const MAX_CANDIDATES = 2000;
 
-function digest(value) {
+function hash(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-function sameSite(a, b) {
-  const clean = host => host.toLowerCase().replace(/^www\./, '');
-  return clean(a) === clean(b);
+function canonicalHost(hostname) {
+  return hostname.toLowerCase().replace(/^www\./, '');
 }
 
-function normalize(value, baseUrl) {
+function isSameSite(value, baseUrl) {
   try {
     const url = new URL(value, baseUrl);
     const base = new URL(baseUrl);
+    return canonicalHost(url.hostname) === canonicalHost(base.hostname);
+  } catch {
+    return false;
+  }
+}
 
+function normalizeUrl(value, baseUrl) {
+  try {
+    const url = new URL(value, baseUrl);
     if (!['http:', 'https:'].includes(url.protocol)) return null;
-    if (!sameSite(url.hostname, base.hostname)) return null;
+    if (!isSameSite(url.toString(), baseUrl)) return null;
 
     url.hash = '';
     url.search = '';
@@ -37,145 +44,160 @@ function isPage(url) {
   );
 }
 
-function add(set, value, baseUrl) {
-  const url = normalize(value, baseUrl);
-  if (url && set.size < MAX_CANDIDATES) set.add(url);
-  return url;
+function addCandidate(candidates, value, baseUrl, source) {
+  const url = normalizeUrl(value, baseUrl);
+  if (!url || candidates.size >= MAX_CANDIDATES) return;
+
+  const existing = candidates.get(url);
+  if (existing) {
+    existing.sources.add(source);
+  } else {
+    candidates.set(url, { url, sources: new Set([source]) });
+  }
 }
 
-export async function scanPaths(target) {
+function extractRoutes(text, baseUrl, candidates, source) {
+  if (!text) return;
+
+  for (const value of text.match(/https?:\/\/[^\s"'<>\\]+/g) || []) {
+    addCandidate(candidates, value.replace(/[),.;]+$/, ''), baseUrl, source);
+  }
+
+  for (const value of text.match(/(?:["'`])\/(?!\/)[^"'`\s]{2,200}/g) || []) {
+    addCandidate(candidates, value.slice(1), baseUrl, source);
+  }
+}
+
+async function crawlSource(baseUrl, seeds) {
   const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (compatible; paths-v2/1.0)'
+  });
+  const candidates = new Map();
+  const queue = [];
+  const visited = new Set();
 
   try {
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (compatible; paths-v2/1.0)'
-    });
-    const page = await context.newPage();
-    const baseUrl = new URL(target.url).toString();
-    const discovered = new Set();
-    const queue = [];
-    const crawled = new Set();
-    const networkUrls = new Set();
-
-    page.on('request', request => {
-      add(networkUrls, request.url(), baseUrl);
-    });
-
-    page.on('response', response => {
-      add(networkUrls, response.url(), baseUrl);
-    });
-
-    console.log(`[paths] target=${target.url}`);
-
-    const response = await page.goto(target.url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 45_000
-    }).catch(error => {
-      console.error(`[paths] homepage navigation failed: ${error.message}`);
-      return null;
-    });
-
-    console.log(`[paths] homepage status=${response?.status() ?? 'none'}`);
-    console.log(`[paths] final URL=${page.url()}`);
-
-    await page.waitForTimeout(5000);
-
-    const hrefs = await page.locator('a[href]').evaluateAll(
-      nodes => nodes.map(node => node.href)
-    ).catch(() => []);
-
-    console.log(`[paths] homepage hrefs=${hrefs.length}`);
-
-    add(discovered, page.url(), baseUrl);
-    for (const href of hrefs) {
-      const url = add(discovered, href, baseUrl);
-      if (url && isPage(url)) queue.push(url);
+    for (const seed of seeds) {
+      addCandidate(candidates, seed, baseUrl, 'seed');
+      queue.push(seed);
     }
 
-    for (const url of networkUrls) add(discovered, url, baseUrl);
+    addCandidate(candidates, baseUrl, baseUrl, 'target');
+    queue.push(baseUrl);
 
-    console.log(
-      `[paths] after homepage: discovered=${discovered.size}, network=${networkUrls.size}, queue=${queue.length}`
-    );
+    while (queue.length && visited.size < MAX_PAGES) {
+      const requested = queue.shift();
+      const url = normalizeUrl(requested, baseUrl);
+      if (!url || visited.has(url)) continue;
+      visited.add(url);
 
-    while (queue.length && crawled.size < MAX_PAGES) {
-      const url = queue.shift();
-      if (crawled.has(url)) continue;
-      crawled.add(url);
+      const page = await context.newPage();
+      const network = new Set();
 
-      const child = await context.newPage();
-      const childNetwork = [];
-
-      child.on('response', response => childNetwork.push(response.url()));
-
-      const childResponse = await child.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 20_000
-      }).catch(() => null);
-
-      const childHrefs = await child.locator('a[href]').evaluateAll(
-        nodes => nodes.map(node => node.href)
-      ).catch(() => []);
-
-      add(discovered, child.url(), baseUrl);
-      for (const href of childHrefs) {
-        const normalized = add(discovered, href, baseUrl);
-        if (normalized && isPage(normalized) && !crawled.has(normalized)) {
-          queue.push(normalized);
-        }
-      }
-
-      for (const networkUrl of childNetwork) add(discovered, networkUrl, baseUrl);
-      await child.close().catch(() => {});
-
-      console.log(
-        `[crawl] pages=${crawled.size}, discovered=${discovered.size}, queue=${queue.length}, status=${childResponse?.status() ?? 'none'}`
-      );
-    }
-
-    let external = [];
-    try {
-      external = await discoverPublicPaths(baseUrl, [...discovered]);
-    } catch (error) {
-      console.error(`[discovery] failed: ${error.message}`);
-    }
-
-    for (const url of external) add(discovered, url, baseUrl);
-
-    console.log(
-      `[paths] FINAL discovered=${discovered.size}, crawled=${crawled.size}, external=${external.length}`
-    );
-    console.log(`[paths] URLs=${JSON.stringify([...discovered].slice(0, 100))}`);
-
-    const results = [];
-
-    for (const url of discovered) {
-      const request = await context.request.get(url, {
-        timeout: 20_000,
-        failOnStatusCode: false
-      }).catch(() => null);
-
-      const status = request?.status() ?? null;
-      const body = request ? await request.text().catch(() => '') : '';
-
-      const saved = savePath({
-        targetId: target.id,
-        url,
-        path: new URL(url).pathname || '/',
-        status,
-        contentHash: digest(body)
+      page.on('response', response => {
+        const value = normalizeUrl(response.url(), baseUrl);
+        if (value) network.add(value);
       });
 
-      console.log(`[save] ${saved.type} ${status ?? 'unknown'} ${url}`);
+      const response = await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 45_000
+      }).catch(() => null);
 
-      if (saved.type !== 'unchanged') {
-        results.push({ type: saved.type, url, status });
+      await page.waitForTimeout(1_500);
+
+      const finalUrl = normalizeUrl(page.url(), baseUrl);
+      if (finalUrl) addCandidate(candidates, finalUrl, baseUrl, 'redirect');
+
+      const hrefs = await page.locator('a[href]').evaluateAll(
+        nodes => nodes.map(node => node.href)
+      ).catch(() => []);
+      const html = await page.content().catch(() => '');
+
+      for (const href of hrefs) {
+        const value = normalizeUrl(href, baseUrl);
+        if (!value) continue;
+        addCandidate(candidates, value, baseUrl, 'link');
+        if (isPage(value) && !visited.has(value)) queue.push(value);
       }
-    }
 
-    console.log(`[paths] changes=${results.length}`);
-    return results;
+      for (const value of network) {
+        addCandidate(candidates, value, baseUrl, 'network');
+      }
+
+      extractRoutes(html, baseUrl, candidates, 'html');
+
+      await page.close().catch(() => {});
+
+      console.log(
+        `[crawl] visited=${visited.size} candidates=${candidates.size} queue=${queue.length}`
+      );
+    }
   } finally {
     await browser.close();
   }
+
+  return candidates;
+}
+
+export async function scanPaths(target) {
+  const seeds = Array.isArray(target.seeds) ? target.seeds : [];
+  const candidates = await crawlSource(target.url, seeds);
+
+  let external = [];
+  try {
+    external = await discoverPublicPaths(
+      target.url,
+      [...candidates.keys()]
+    );
+  } catch (error) {
+    console.error(`[discovery] external sources failed: ${error.message}`);
+  }
+
+  for (const url of external) {
+    addCandidate(candidates, url, target.url, 'external');
+  }
+
+  console.log(
+    `[sentinel] target=${target.name} candidates=${candidates.size} sources=seed,link,network,html,redirect,external`
+  );
+
+  const changes = [];
+  const current = new Set(candidates.keys());
+
+  for (const entry of candidates.values()) {
+    const request = await fetch(entry.url, {
+      headers: { 'user-agent': 'paths-v2/1.0' },
+      signal: AbortSignal.timeout(20_000)
+    }).catch(() => null);
+
+    const status = request?.status ?? null;
+    const body = request ? await request.text().catch(() => '') : '';
+    const source = [...entry.sources].join(',');
+
+    const result = savePath({
+      targetId: target.id,
+      url: entry.url,
+      path: new URL(entry.url).pathname || '/',
+      status,
+      contentHash: hash(body),
+      source
+    });
+
+    if (result.type !== 'unchanged') {
+      changes.push({
+        type: result.type,
+        url: entry.url,
+        status,
+        source
+      });
+    }
+  }
+
+  console.log(
+    `[sentinel] discovered=${current.size} stored=${current.size} changes=${changes.length}`
+  );
+
+  return changes;
 }
