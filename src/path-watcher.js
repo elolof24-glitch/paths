@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { chromium } from 'playwright';
-import { savePath } from './database.js';
+import { savePath, getNewPathsSinceLastScan, updateLastScan } from './database.js';
 import { fetchRobotsTxt } from './discovery/robots.js';
 import { fetchSitemaps } from './discovery/sitemaps.js';
 import { fetchCommonCrawl } from './discovery/commoncrawl.js';
@@ -157,8 +157,7 @@ export async function scanPaths(target) {
 
     console.log(`[paths] discovered=${discovered.size}`);
 
-    const changes = [];
-
+    // Save all discovered paths
     for (const url of discovered) {
       const request = await context.request.get(url, {
         timeout: 20_000,
@@ -168,21 +167,30 @@ export async function scanPaths(target) {
       const status = request?.status() ?? null;
       const body = request ? await request.text().catch(() => '') : '';
 
-      const result = savePath({
+      savePath({
         targetId: target.id,
         url,
         path: new URL(url).pathname || '/',
         status,
         contentHash: hash(body)
       });
-
-      if (result.type !== 'unchanged') {
-        changes.push({ type: result.type, url, status });
-      }
     }
 
+    // Get ONLY new paths since last scan
+    const newPaths = getNewPathsSinceLastScan(target.id);
+    
+    // Update last scan timestamp
+    updateLastScan(target.id);
+
+    const changes = newPaths.map(p => ({
+      type: 'new',
+      url: p.url,
+      status: p.status,
+      first_seen: p.first_seen
+    }));
+
     console.log(
-      `[paths] stored=${discovered.size} new_or_changed=${changes.length}`
+      `[paths] stored=${discovered.size} new_since_last_scan=${changes.length}`
     );
 
     return {
