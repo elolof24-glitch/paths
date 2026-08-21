@@ -17,6 +17,6 @@ export const config = {
   guildId: process.env.DISCORD_GUILD_ID,
   alertChannelId: process.env.DISCORD_ALERT_CHANNEL_ID,
   alertRoleId: process.env.DISCORD_ALERT_ROLE_ID || '',
-  pollSeconds: Math.max(300, Number(process.env.POLL_SECONDS || 900)),
+  pollSeconds: Math.max(60, Number(process.env.POLL_SECONDS || 10)), // Scan every 10 seconds
   databasePath: process.env.DATABASE_PATH || './data/v2.sqlite'
 };
