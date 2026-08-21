@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { chromium } from 'playwright';
 import { savePath } from './database.js';
+import { discoverPublicPaths } from './discovery.js';
 
 function digest(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -27,86 +28,11 @@ function trackable(url, baseUrl) {
   if (!normalized) return null;
 
   const pathname = new URL(normalized).pathname;
-  if (/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt)$/i.test(pathname)) {
+  if (/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt|json)$/i.test(pathname)) {
     return null;
   }
 
   return normalized;
-}
-
-async function getCommonCrawlUrls(baseUrl) {
-  const host = new URL(baseUrl).hostname;
-  const indexList = await fetch('https://index.commoncrawl.org/collinfo.json')
-    .then(response => response.json())
-    .catch(() => []);
-
-  const latest = indexList[0]?.cdx-api;
-  if (!latest) return [];
-
-  const query = new URL(latest);
-  query.searchParams.set('url', `${host}/*`);
-  query.searchParams.set('output', 'json');
-  query.searchParams.set('fl', 'url,status,mime');
-  query.searchParams.set('filter', 'status:200');
-  query.searchParams.set('collapse', 'urlkey');
-  query.searchParams.set('pageSize', '5000');
-
-  const text = await fetch(query).then(response => response.text()).catch(() => '');
-  const urls = [];
-
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-
-    try {
-      const row = JSON.parse(line);
-      if (row.url) urls.push(row.url);
-    } catch {}
-  }
-
-  return urls;
-}
-
-async function getSitemapUrls(baseUrl) {
-  const base = new URL(baseUrl);
-  const candidates = [
-    new URL('/sitemap.xml', base).toString(),
-    new URL('/sitemap_index.xml', base).toString(),
-    new URL('/sitemap-index.xml', base).toString()
-  ];
-
-  const robots = await fetch(new URL('/robots.txt', base))
-    .then(response => response.text())
-    .catch(() => '');
-
-  for (const line of robots.split(/\r?\n/)) {
-    if (line.toLowerCase().startsWith('sitemap:')) {
-      candidates.push(line.slice(line.indexOf(':') + 1).trim());
-    }
-  }
-
-  const visited = new Set();
-  const urls = new Set();
-
-  async function readSitemap(url, depth = 0) {
-    if (depth > 2 || visited.has(url)) return;
-    visited.add(url);
-
-    const xml = await fetch(url).then(response => response.text()).catch(() => '');
-    if (!xml) return;
-
-    for (const match of xml.match(/<loc>[^<]+<\/loc>/g) || []) {
-      const location = match.replace(/<\/?loc>/g, '').trim();
-
-      if (/sitemap/i.test(location)) {
-        await readSitemap(location, depth + 1);
-      } else {
-        urls.add(location);
-      }
-    }
-  }
-
-  for (const candidate of candidates) await readSitemap(candidate);
-  return [...urls];
 }
 
 export async function scanPaths(target) {
@@ -131,20 +57,27 @@ export async function scanPaths(target) {
       nodes => nodes.map(node => node.href)
     );
 
-    for (const link of links) {
-      const url = trackable(link, base.toString());
-      if (url) discovered.add(url);
+    const browserUrls = links
+      .map(link => trackable(link, base.toString()))
+      .filter(Boolean);
+
+    for (const url of browserUrls) {
+      discovered.add(url);
     }
 
-    for (const url of await getSitemapUrls(base.toString())) {
+    const publicUrls = await discoverPublicPaths(
+      base.toString(),
+      browserUrls
+    );
+
+    for (const url of publicUrls) {
       const trackableUrl = trackable(url, base.toString());
       if (trackableUrl) discovered.add(trackableUrl);
     }
 
-    for (const url of await getCommonCrawlUrls(base.toString())) {
-      const trackableUrl = trackable(url, base.toString());
-      if (trackableUrl) discovered.add(trackableUrl);
-    }
+    console.log(
+      `[paths] ${target.name}: ${discovered.size} public path candidate(s)`
+    );
 
     const results = [];
 
