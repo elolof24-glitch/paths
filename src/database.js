@@ -94,3 +94,13 @@ export function savePath({ targetId, url, path: pathname, status, contentHash })
 
   return { type: changed ? 'changed' : 'unchanged' };
 }
+
+export function countStoredPaths(targetId) {
+  const result = db.prepare(`
+    SELECT COUNT(*) as count
+    FROM paths
+    WHERE target_id = ?
+  `).get(targetId);
+  
+  return result.count;
+}
