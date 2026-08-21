@@ -1,9 +1,5 @@
-function canonicalHostname(hostname) {
+function canonicalHost(hostname) {
   return hostname.toLowerCase().replace(/^www\./, '');
-}
-
-function allowedHost(hostname, baseHostname) {
-  return canonicalHostname(hostname) === canonicalHostname(baseHostname);
 }
 
 function normalize(value, baseUrl) {
@@ -12,7 +8,7 @@ function normalize(value, baseUrl) {
     const base = new URL(baseUrl);
 
     if (!['http:', 'https:'].includes(url.protocol)) return null;
-    if (!allowedHost(url.hostname, base.hostname)) return null;
+    if (canonicalHost(url.hostname) !== canonicalHost(base.hostname)) return null;
 
     url.hash = '';
     url.search = '';
@@ -37,12 +33,12 @@ async function fetchText(url) {
   return response.text().catch(() => '');
 }
 
-function addUrl(set, value, baseUrl) {
-  const normalized = normalize(value, baseUrl);
-  if (normalized) set.add(normalized);
+function add(set, value, baseUrl) {
+  const url = normalize(value, baseUrl);
+  if (url) set.add(url);
 }
 
-async function getSitemapUrls(baseUrl) {
+async function sitemapUrls(baseUrl) {
   const base = new URL(baseUrl);
   const queue = new Set([
     new URL('/sitemap.xml', base).toString(),
@@ -54,29 +50,28 @@ async function getSitemapUrls(baseUrl) {
   const robots = await fetchText(new URL('/robots.txt', base));
 
   for (const line of robots.split(/\r?\n/)) {
-    if (line.toLowerCase().startsWith('sitemap:')) {
-      queue.add(line.slice(line.indexOf(':') + 1).trim());
+    const trimmed = line.trim();
+    if (/^sitemap:/i.test(trimmed)) {
+      queue.add(trimmed.slice(trimmed.indexOf(':') + 1).trim());
     }
   }
 
-  while (queue.size && visited.size < 200) {
-    const sitemapUrl = queue.values().next().value;
-    queue.delete(sitemapUrl);
-    if (visited.has(sitemapUrl)) continue;
-    visited.add(sitemapUrl);
+  while (queue.size && visited.size < 300) {
+    const sitemap = queue.values().next().value;
+    queue.delete(sitemap);
+    if (visited.has(sitemap)) continue;
+    visited.add(sitemap);
 
-    const xml = await fetchText(sitemapUrl);
+    const xml = await fetchText(sitemap);
     if (!xml) continue;
-
-    const isIndex = /<sitemapindex[\s>]/i.test(xml);
 
     for (const match of xml.match(/<loc>[^<]+<\/loc>/gi) || []) {
       const location = match.replace(/<\/?loc>/gi, '').trim();
 
-      if (isIndex || /sitemap/i.test(location)) {
+      if (/<sitemapindex[\s>]/i.test(xml)) {
         queue.add(location);
       } else {
-        addUrl(urls, location, baseUrl);
+        add(urls, location, baseUrl);
       }
     }
   }
@@ -84,14 +79,12 @@ async function getSitemapUrls(baseUrl) {
   return urls;
 }
 
-async function getCommonCrawlUrls(baseUrl) {
+async function commonCrawlUrls(baseUrl) {
   const host = new URL(baseUrl).hostname;
-  const collections = JSON.parse(
-    await fetchText('https://index.commoncrawl.org/collinfo.json') || '[]'
-  );
+  const collections = JSON.parse(await fetchText('https://index.commoncrawl.org/collinfo.json') || '[]');
   const urls = new Set();
 
-  for (const collection of collections.slice(0, 5)) {
+  for (const collection of collections.slice(0, 10)) {
     const endpoint = collection?.['cdx-api'] || collection?.cdx_api;
     if (!endpoint) continue;
 
@@ -104,13 +97,11 @@ async function getCommonCrawlUrls(baseUrl) {
     query.searchParams.set('limit', '5000');
 
     const text = await fetchText(query.toString());
-
     for (const line of text.split(/\r?\n/)) {
       if (!line.trim()) continue;
-
       try {
         const row = JSON.parse(line);
-        addUrl(urls, row.url, baseUrl);
+        add(urls, row.url, baseUrl);
       } catch {}
     }
   }
@@ -118,7 +109,7 @@ async function getCommonCrawlUrls(baseUrl) {
   return urls;
 }
 
-async function getWaybackUrls(baseUrl) {
+async function waybackUrls(baseUrl) {
   const base = new URL(baseUrl);
   const query = new URL('https://web.archive.org/cdx/search/cdx');
   const urls = new Set();
@@ -126,7 +117,7 @@ async function getWaybackUrls(baseUrl) {
   query.searchParams.set('url', `${base.hostname}/*`);
   query.searchParams.set('matchType', 'prefix');
   query.searchParams.set('output', 'json');
-  query.searchParams.set('fl', 'original,statuscode');
+  query.searchParams.set('fl', 'original');
   query.searchParams.set('filter', 'statuscode:200');
   query.searchParams.set('collapse', 'urlkey');
   query.searchParams.set('limit', '5000');
@@ -142,14 +133,12 @@ async function getWaybackUrls(baseUrl) {
 
   if (!Array.isArray(rows) || rows.length < 2) return urls;
 
-  const header = rows[0];
-  const originalIndex = Array.isArray(header)
-    ? header.indexOf('original')
-    : -1;
+  const header = Array.isArray(rows[0]) ? rows[0] : [];
+  const originalIndex = header.indexOf('original');
 
   for (const row of rows.slice(1)) {
     const value = originalIndex >= 0 ? row[originalIndex] : row[0];
-    addUrl(urls, value, baseUrl);
+    add(urls, value, baseUrl);
   }
 
   return urls;
@@ -157,21 +146,18 @@ async function getWaybackUrls(baseUrl) {
 
 export async function discoverPublicPaths(baseUrl, browserUrls = []) {
   const discovered = new Set();
-
-  for (const url of browserUrls) {
-    addUrl(discovered, url, baseUrl);
-  }
+  for (const url of browserUrls) add(discovered, url, baseUrl);
 
   const sources = [
-    ['sitemap', getSitemapUrls(baseUrl)],
-    ['commoncrawl', getCommonCrawlUrls(baseUrl)],
-    ['wayback', getWaybackUrls(baseUrl)]
+    ['sitemap', sitemapUrls(baseUrl)],
+    ['commoncrawl', commonCrawlUrls(baseUrl)],
+    ['wayback', waybackUrls(baseUrl)]
   ];
   const results = await Promise.allSettled(sources.map(([, promise]) => promise));
 
-  for (let index = 0; index < results.length; index++) {
-    const [name] = sources[index];
-    const result = results[index];
+  for (let i = 0; i < results.length; i++) {
+    const [name] = sources[i];
+    const result = results[i];
 
     if (result.status === 'fulfilled') {
       console.log(`[discovery] ${name}: ${result.value.size} URL(s)`);
