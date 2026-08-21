@@ -54,16 +54,43 @@ function crawlable(url) {
 function recentPath(url) {
   try {
     const pathname = new URL(url).pathname.toLowerCase();
-    
-    if (/\/202[0-4]\//.test(pathname)) {
-      return false;
-    }
-    
+    if (/\/202[0-4]\//.test(pathname)) return false;
     return true;
   } catch {
     return false;
   }
 }
+
+// === NEW: Filter for high-value paths ===
+function isHighValue(url) {
+  const path = new URL(url).pathname.toLowerCase();
+  
+  // Skip trading pairs (noise)
+  if (path.includes('/trade/')) return false;
+  if (path.match(/_[a-z]{3,6}$/i)) return false; // Ends with _USDT, _BTC, etc.
+  
+  // Skip generic paths
+  if (path.includes('/captcha/')) return false;
+  if (path.includes('/login/')) return false;
+  if (path.includes('/register/')) return false;
+  if (path.includes('/api/')) return false;
+  
+  // Keep high-value paths
+  if (path.includes('/en/') || path.includes('/zh-CN/') || path.includes('/ja/')) return true;
+  if (path.includes('/product/') || path.includes('/products/')) return true;
+  if (path.includes('/announcement/') || path.includes('/announcements/')) return true;
+  if (path.includes('/blog/') || path.includes('/news/')) return true;
+  if (path.includes('/new/') || path.includes('/latest/')) return true;
+  if (path.includes('/feature/') || path.includes('/features/')) return true;
+  if (path.includes('/agent-') || path.includes('/os/') || path.includes('/ai/')) return true;
+  
+  // Keep short, clean paths (likely important pages)
+  const segments = path.split('/').filter(s => s.length > 0);
+  if (segments.length <= 3 && segments.every(s => s.length > 2)) return true;
+  
+  return false; // Skip everything else
+}
+// ==========================================
 
 export async function scanPaths(target) {
   const browser = await chromium.launch({ headless: true });
@@ -90,25 +117,25 @@ export async function scanPaths(target) {
     // 1. robots.txt
     const robotsUrls = await fetchRobotsTxt(baseUrl);
     for (const url of robotsUrls) {
-      if (recentPath(url) && !isBlacklisted(url)) add(discovered, url, baseUrl);
+      if (recentPath(url) && !isBlacklisted(url) && isHighValue(url)) add(discovered, url, baseUrl);
     }
 
     // 2. sitemaps
     const sitemapUrls = await fetchSitemaps(baseUrl);
     for (const url of sitemapUrls) {
-      if (recentPath(url) && !isBlacklisted(url)) add(discovered, url, baseUrl);
+      if (recentPath(url) && !isBlacklisted(url) && isHighValue(url)) add(discovered, url, baseUrl);
     }
 
     // 3. Common Crawl
     const ccUrls = await fetchCommonCrawl(baseUrl);
     for (const url of ccUrls) {
-      if (recentPath(url) && !isBlacklisted(url)) add(discovered, url, baseUrl);
+      if (recentPath(url) && !isBlacklisted(url) && isHighValue(url)) add(discovered, url, baseUrl);
     }
 
     // 4. Wayback
     const wbUrls = await fetchWayback(baseUrl);
     for (const url of wbUrls) {
-      if (recentPath(url) && !isBlacklisted(url)) add(discovered, url, baseUrl);
+      if (recentPath(url) && !isBlacklisted(url) && isHighValue(url)) add(discovered, url, baseUrl);
     }
 
     // === Existing: seeds and crawling ===
@@ -118,7 +145,7 @@ export async function scanPaths(target) {
 
     for (const seed of seeds) {
       const url = add(discovered, seed, baseUrl);
-      if (url && !isBlacklisted(url)) queue.push(url);
+      if (url && !isBlacklisted(url) && isHighValue(url)) queue.push(url);
     }
 
     while (queue.length && visited.size < MAX_PAGES) {
@@ -138,7 +165,7 @@ export async function scanPaths(target) {
         await page.waitForTimeout(2_000);
 
         const finalUrl = add(discovered, page.url(), baseUrl);
-        if (finalUrl && crawlable(finalUrl) && !visited.has(finalUrl) && !isBlacklisted(finalUrl)) {
+        if (finalUrl && crawlable(finalUrl) && !visited.has(finalUrl) && !isBlacklisted(finalUrl) && isHighValue(finalUrl)) {
           queue.push(finalUrl);
         }
 
@@ -148,7 +175,7 @@ export async function scanPaths(target) {
 
         for (const href of hrefs) {
           const found = add(discovered, href, baseUrl);
-          if (found && crawlable(found) && !visited.has(found) && !isBlacklisted(found)) {
+          if (found && crawlable(found) && !visited.has(found) && !isBlacklisted(found) && isHighValue(found)) {
             queue.push(found);
           }
         }
