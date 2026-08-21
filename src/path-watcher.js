@@ -6,10 +6,10 @@ function digest(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-function normalizeUrl(value, origin) {
+function normalizeUrl(value, baseUrl) {
   try {
-    const url = new URL(value, origin);
-    const base = new URL(origin);
+    const url = new URL(value, baseUrl);
+    const base = new URL(baseUrl);
 
     if (!['http:', 'https:'].includes(url.protocol)) return null;
     if (url.origin !== base.origin) return null;
@@ -30,14 +30,20 @@ export async function scanPaths(target) {
   const browser = await chromium.launch({ headless: true });
 
   try {
-    const page = await browser.newPage();
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (compatible; paths-v2/1.0)'
+    });
+    const page = await context.newPage();
     const base = new URL(target.url);
-    const discovered = new Set([base.toString()]);
+    const discovered = new Set();
 
-    await page.goto(target.url, {
-      waitUntil: 'networkidle',
+    const response = await page.goto(target.url, {
+      waitUntil: 'domcontentloaded',
       timeout: 45_000
     });
+
+    await page.waitForTimeout(3000);
+    discovered.add(base.toString());
 
     const links = await page.locator('a[href]').evaluateAll(
       nodes => nodes.map(node => node.href)
@@ -52,29 +58,32 @@ export async function scanPaths(target) {
     const results = [];
 
     for (const url of discovered) {
-      const response = await page.request.get(url, {
-        timeout: 20_000,
-        failOnStatusCode: false
-      }).catch(() => null);
+      let status = null;
+      let body = '';
 
-      const body = response
-        ? await response.text().catch(() => '')
-        : '';
+      if (url === base.toString() && response) {
+        status = response.status();
+        body = await response.text().catch(() => '');
+      } else {
+        const request = await context.request.get(url, {
+          timeout: 20_000,
+          failOnStatusCode: false
+        }).catch(() => null);
+
+        status = request?.status() ?? null;
+        body = request ? await request.text().catch(() => '') : '';
+      }
 
       const result = savePath({
         targetId: target.id,
         url,
         path: new URL(url).pathname || '/',
-        status: response?.status() || null,
+        status,
         contentHash: digest(body)
       });
 
       if (result.type !== 'unchanged') {
-        results.push({
-          type: result.type,
-          url,
-          status: response?.status() || null
-        });
+        results.push({ type: result.type, url, status });
       }
     }
 
