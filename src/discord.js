@@ -62,13 +62,15 @@ export const commands = [
     .setDescription('List currently monitored path targets'),
   new SlashCommandBuilder()
     .setName('scan2')
-    .setDescription('Export all stored URL paths as text'),
+    .setDescription('Export all stored URL paths as text')
+    .addStringOption(option => option.setName('target').setDescription('Target name (optional, exports all if omitted)').setRequired(false)),
   new SlashCommandBuilder()
     .setName('testalert2')
     .setDescription('Send a test new-path alert'),
   new SlashCommandBuilder()
     .setName('check')
     .setDescription('Check all monitored targets now')
+    .addStringOption(option => option.setName('target').setDescription('Target name (optional, checks all if omitted)').setRequired(false))
 ].map(command => command.toJSON());
 
 function parisTime(date = new Date()) {
@@ -318,12 +320,22 @@ export async function startDiscord() {
       if (interaction.commandName === 'scan2') {
         await interaction.deferReply({ ephemeral: true });
 
+        const targetName = interaction.options.getString('target');
         const targets = getTargets();
+        
         if (!targets.length) {
           return interaction.editReply('No websites are currently monitored.');
         }
+        
+        const filteredTargets = targetName 
+          ? targets.filter(t => t.name === targetName)
+          : targets;
+        
+        if (!filteredTargets.length) {
+          return interaction.editReply(`Target **${targetName}** not found.`);
+        }
 
-        const files = targets.map(target => {
+        const files = filteredTargets.map(target => {
           const paths = getStoredPaths(target.id);
           return new AttachmentBuilder(
             pathFile(target, paths),
@@ -332,7 +344,7 @@ export async function startDiscord() {
         });
 
         return interaction.editReply({
-          content: `Exported all stored URL paths for ${targets.length} monitored target(s).`,
+          content: `Exported path(s) for **${filteredTargets.length}** target(s).`,
           files
         });
       }
@@ -345,8 +357,39 @@ export async function startDiscord() {
 
       if (interaction.commandName === 'check') {
         await interaction.deferReply({ ephemeral: true });
-        await checkAll();
-        return interaction.editReply('Path checks completed.');
+        
+        const targetName = interaction.options.getString('target');
+        const targets = getTargets();
+        
+        if (!targets.length) {
+          return interaction.editReply('No websites are currently monitored.');
+        }
+        
+        const filteredTargets = targetName 
+          ? targets.filter(t => t.name === targetName)
+          : targets;
+        
+        if (!filteredTargets.length) {
+          return interaction.editReply(`Target **${targetName}** not found.`);
+        }
+        
+        for (const target of filteredTargets) {
+          try {
+            console.log(`[scan] starting ${target.name}`);
+            const results = await scanPaths(target);
+            
+            if (results.changes && results.changes.length > 0) {
+              await sendResults(target, results.changes);
+            }
+            
+            console.log(`${target.name}: ${results.changes?.length || 0} new or changed path(s)`);
+          } catch (error) {
+            console.error(`${target.name}: ${error.message}`);
+            console.error(error.stack);
+          }
+        }
+        
+        return interaction.editReply(`Checked **${filteredTargets.length}** target(s).`);
       }
     } catch (error) {
       console.error(error);
