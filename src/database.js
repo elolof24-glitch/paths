@@ -32,6 +32,15 @@ db.exec(`
     FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
     UNIQUE(target_id, url)
   );
+
+  CREATE TABLE IF NOT EXISTS blacklist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id INTEGER NOT NULL,
+    pattern TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+    UNIQUE(target_id, pattern)
+  );
 `);
 
 // Migration: add last_scan_at column if it doesn't exist
@@ -148,4 +157,30 @@ export function removeUrlsByPattern(targetId, pattern) {
 
 export function updateLastScan(targetId) {
   db.prepare(`UPDATE targets SET last_scan_at = CURRENT_TIMESTAMP WHERE id = ?`).run(targetId);
+}
+
+export function addBlacklist(targetId, pattern) {
+  return db.prepare(`
+    INSERT INTO blacklist (target_id, pattern)
+    VALUES (?, ?)
+    ON CONFLICT(target_id, pattern) DO NOTHING
+  `).run(targetId, pattern);
+}
+
+export function getBlacklist(targetId) {
+  return db.prepare(`
+    SELECT pattern FROM blacklist WHERE target_id = ?
+  `).all(targetId).map(r => r.pattern);
+}
+
+export function removeBlacklist(targetId, pattern) {
+  return db.prepare(`
+    DELETE FROM blacklist WHERE target_id = ? AND pattern = ?
+  `).run(targetId, pattern);
+}
+
+export function clearBlacklist(targetId) {
+  return db.prepare(`
+    DELETE FROM blacklist WHERE target_id = ?
+  `).run(targetId);
 }
