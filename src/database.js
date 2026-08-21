@@ -8,6 +8,7 @@ fs.mkdirSync(directory, { recursive: true });
 
 const db = new Database(config.databasePath);
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS targets (
@@ -33,30 +34,51 @@ db.exec(`
 `);
 
 export function upsertTarget(name, url) {
-  db.prepare(`
+  return db.prepare(`
     INSERT INTO targets (name, url)
     VALUES (?, ?)
-    ON CONFLICT(name) DO UPDATE SET url = excluded.url, enabled = 1
+    ON CONFLICT(name) DO UPDATE SET
+      url = excluded.url,
+      enabled = 1
   `).run(name, url);
 }
 
 export function disableTarget(name) {
-  return db.prepare('UPDATE targets SET enabled = 0 WHERE name = ?').run(name);
+  return db.prepare(`
+    UPDATE targets SET enabled = 0 WHERE name = ?
+  `).run(name);
 }
 
 export function getTargets() {
-  return db.prepare('SELECT * FROM targets WHERE enabled = 1 ORDER BY name').all();
+  return db.prepare(`
+    SELECT id, name, url, enabled, created_at
+    FROM targets
+    WHERE enabled = 1
+    ORDER BY name
+  `).all();
+}
+
+export function getStoredPaths(targetId) {
+  return db.prepare(`
+    SELECT url, path, status, first_seen, last_seen
+    FROM paths
+    WHERE target_id = ?
+    ORDER BY path ASC
+  `).all(targetId);
 }
 
 export function savePath({ targetId, url, path: pathname, status, contentHash }) {
   const existing = db.prepare(`
-    SELECT * FROM paths WHERE target_id = ? AND url = ?
+    SELECT id, content_hash
+    FROM paths
+    WHERE target_id = ? AND url = ?
   `).get(targetId, url);
 
   if (!existing) {
     db.prepare(`
-      INSERT INTO paths (target_id, url, path, status, content_hash)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO paths (
+        target_id, url, path, status, content_hash
+      ) VALUES (?, ?, ?, ?, ?)
     `).run(targetId, url, pathname, status, contentHash);
 
     return { type: 'new' };
@@ -66,9 +88,9 @@ export function savePath({ targetId, url, path: pathname, status, contentHash })
 
   db.prepare(`
     UPDATE paths
-    SET status = ?, content_hash = ?, last_seen = CURRENT_TIMESTAMP
+    SET path = ?, status = ?, content_hash = ?, last_seen = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(status, contentHash, existing.id);
+  `).run(pathname, status, contentHash, existing.id);
 
-  return changed ? { type: 'changed' } : { type: 'unchanged' };
+  return { type: changed ? 'changed' : 'unchanged' };
 }
