@@ -1,5 +1,4 @@
 import { request } from 'playwright';
-import { parseStringPromise } from 'xml2js';
 
 export async function fetchSitemaps(baseUrl) {
   const urls = [];
@@ -10,19 +9,25 @@ export async function fetchSitemaps(baseUrl) {
     
     for (const path of candidates) {
       const sitemapUrl = new URL(path, baseUrl).toString();
+      console.log(`[sitemaps] fetching ${sitemapUrl}`);
+      
       const response = await ctx.get(sitemapUrl, { timeout: 10_000 });
       
       if (response.ok()) {
         const xml = await response.text();
-        const result = await parseStringPromise(xml);
+        console.log(`[sitemaps] got ${xml.length} bytes`);
         
-        if (result.urlset?.url) {
-          for (const entry of result.urlset.url) {
-            if (entry.loc?.[0]) {
-              urls.push(entry.loc[0]);
-            }
-          }
+        // Simple regex to extract URLs from <loc> tags
+        const urlMatches = xml.match(/<loc>([^<]+)<\/loc>/g) || [];
+        
+        for (const match of urlMatches) {
+          const url = match.replace(/<loc>|<\/loc>/g, '');
+          urls.push(url);
         }
+        
+        console.log(`[sitemaps] extracted ${urlMatches.length} URLs`);
+      } else {
+        console.log(`[sitemaps] status ${response.status()}`);
       }
     }
   } catch (error) {
@@ -31,5 +36,6 @@ export async function fetchSitemaps(baseUrl) {
     await ctx.dispose();
   }
   
+  console.log(`[sitemaps] returning ${urls.length} URLs`);
   return urls;
 }
