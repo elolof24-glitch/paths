@@ -13,7 +13,8 @@ import {
   disableTarget,
   getStoredPaths,
   getTargets,
-  upsertTarget
+  upsertTarget,
+  removeUrlsByPattern
 } from './database.js';
 import { scanPaths } from './path-watcher.js';
 
@@ -31,6 +32,11 @@ export const commands = [
     .setName('unwatch')
     .setDescription('Stop monitoring a target')
     .addStringOption(option => option.setName('name').setDescription('Target name').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('remove-urls')
+    .setDescription('Remove URLs matching a pattern (e.g., USDT, BTC)')
+    .addStringOption(option => option.setName('target').setDescription('Target name').setRequired(true))
+    .addStringOption(option => option.setName('pattern').setDescription('Pattern to match (e.g., USDT, /convert/)').setRequired(true)),
   new SlashCommandBuilder()
     .setName('watchlist')
     .setDescription('List monitored targets'),
@@ -59,7 +65,7 @@ function parisTime(date = new Date()) {
 
 function timeAgo(date) {
   const now = new Date();
-  const diff = Math.floor((now - date) / 1000); // seconds
+  const diff = Math.floor((now - date) / 1000);
   
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
@@ -200,6 +206,25 @@ export async function startDiscord() {
         const name = interaction.options.getString('name').trim();
         disableTarget(name);
         return interaction.reply({ content: `Stopped **${name}**.`, ephemeral: true });
+      }
+
+      if (interaction.commandName === 'remove-urls') {
+        const targetName = interaction.options.getString('target').trim();
+        const pattern = interaction.options.getString('pattern').trim();
+        
+        const targets = getTargets();
+        const target = targets.find(t => t.name === targetName);
+        
+        if (!target) {
+          return interaction.reply({ content: `Target **${targetName}** not found.`, ephemeral: true });
+        }
+        
+        const removed = removeUrlsByPattern(target.id, pattern);
+        
+        return interaction.reply({
+          content: `✅ Removed **${removed}** URL(s) matching \`${pattern}\` from **${targetName}**`,
+          ephemeral: true
+        });
       }
 
       if (interaction.commandName === 'watchlist' || interaction.commandName === 'path') {
