@@ -9,7 +9,8 @@ RUN npm install
 
 COPY index.js ./
 COPY src ./src
-COPY data ./data
+
+RUN mkdir -p /app/data
 
 ENV NODE_ENV=production
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
