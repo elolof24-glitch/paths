@@ -2,7 +2,7 @@ function canonicalHost(hostname) {
   return hostname.toLowerCase().replace(/^www\./, '');
 }
 
-function normalize(value, baseUrl) {
+function normalize(value, baseUrl, options = {}) {
   try {
     const url = new URL(value, baseUrl);
     const base = new URL(baseUrl);
@@ -13,7 +13,7 @@ function normalize(value, baseUrl) {
     url.hash = '';
     url.search = '';
 
-    if (/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt|json)$/i.test(url.pathname)) {
+    if (!options.allowAssets && /\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt|json|pdf|zip)$/i.test(url.pathname)) {
       return null;
     }
 
@@ -23,18 +23,31 @@ function normalize(value, baseUrl) {
   }
 }
 
-async function fetchText(url) {
+async function fetchText(value) {
+  const url = String(value);
   const response = await fetch(url, {
-    headers: { 'user-agent': 'paths-v2/1.0' },
+    headers: {
+      accept: 'text/html,application/xml,text/xml,text/plain,*/*',
+      'user-agent': 'Mozilla/5.0 (compatible; paths-v2/1.0)'
+    },
+    redirect: 'follow',
     signal: AbortSignal.timeout(30_000)
-  }).catch(() => null);
+  }).catch(error => {
+    console.error(`[discovery] fetch failed ${url}: ${error.message}`);
+    return null;
+  });
 
-  if (!response || !response.ok) return '';
+  if (!response) return '';
+  if (!response.ok) {
+    console.log(`[discovery] ${response.status} ${url}`);
+    return '';
+  }
+
   return response.text().catch(() => '');
 }
 
-function add(set, value, baseUrl) {
-  const url = normalize(value, baseUrl);
+function add(set, value, baseUrl, options = {}) {
+  const url = normalize(value, baseUrl, options);
   if (url) set.add(url);
 }
 
@@ -47,16 +60,19 @@ async function sitemapUrls(baseUrl) {
   ]);
   const visited = new Set();
   const urls = new Set();
-  const robots = await fetchText(new URL('/robots.txt', base));
 
-  for (const line of robots.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (/^sitemap:/i.test(trimmed)) {
-      queue.add(trimmed.slice(trimmed.indexOf(':') + 1).trim());
+  for (const host of new Set([base.hostname, `www.${canonicalHost(base.hostname)}`])) {
+    const robots = await fetchText(`https://${host}/robots.txt`);
+
+    for (const line of robots.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (/^sitemap:/i.test(trimmed)) {
+        queue.add(trimmed.slice(trimmed.indexOf(':') + 1).trim());
+      }
     }
   }
 
-  while (queue.size && visited.size < 300) {
+  while (queue.size && visited.size < 500) {
     const sitemap = queue.values().next().value;
     queue.delete(sitemap);
     if (visited.has(sitemap)) continue;
@@ -65,10 +81,12 @@ async function sitemapUrls(baseUrl) {
     const xml = await fetchText(sitemap);
     if (!xml) continue;
 
+    const isIndex = /<sitemapindex[\s>]/i.test(xml);
+
     for (const match of xml.match(/<loc>[^<]+<\/loc>/gi) || []) {
       const location = match.replace(/<\/?loc>/gi, '').trim();
 
-      if (/<sitemapindex[\s>]/i.test(xml)) {
+      if (isIndex || /sitemap/i.test(location)) {
         queue.add(location);
       } else {
         add(urls, location, baseUrl);
@@ -80,29 +98,46 @@ async function sitemapUrls(baseUrl) {
 }
 
 async function commonCrawlUrls(baseUrl) {
-  const host = new URL(baseUrl).hostname;
-  const collections = JSON.parse(await fetchText('https://index.commoncrawl.org/collinfo.json') || '[]');
+  const base = new URL(baseUrl);
+  const hosts = new Set([
+    base.hostname,
+    `www.${canonicalHost(base.hostname)}`
+  ]);
+  const collectionsText = await fetchText('https://index.commoncrawl.org/collinfo.json');
+  let collections;
+
+  try {
+    collections = JSON.parse(collectionsText || '[]');
+  } catch {
+    console.error('[commoncrawl] invalid collinfo response');
+    return new Set();
+  }
+
   const urls = new Set();
 
-  for (const collection of collections.slice(0, 10)) {
+  for (const collection of collections.slice(0, 5)) {
     const endpoint = collection?.['cdx-api'] || collection?.cdx_api;
     if (!endpoint) continue;
 
-    const query = new URL(endpoint);
-    query.searchParams.set('url', `${host}/*`);
-    query.searchParams.set('output', 'json');
-    query.searchParams.set('fl', 'url,status');
-    query.searchParams.set('filter', 'status:200');
-    query.searchParams.set('collapse', 'urlkey');
-    query.searchParams.set('limit', '5000');
+    for (const host of hosts) {
+      const query = new URL(endpoint);
+      query.searchParams.set('url', `${host}/*`);
+      query.searchParams.set('output', 'json');
+      query.searchParams.set('fl', 'url,status');
+      query.searchParams.set('filter', 'status:200');
+      query.searchParams.set('collapse', 'urlkey');
+      query.searchParams.set('limit', '5000');
 
-    const text = await fetchText(query.toString());
-    for (const line of text.split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      try {
-        const row = JSON.parse(line);
-        add(urls, row.url, baseUrl);
-      } catch {}
+      const text = await fetchText(query.toString());
+
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+
+        try {
+          const row = JSON.parse(line);
+          add(urls, row.url, baseUrl);
+        } catch {}
+      }
     }
   }
 
@@ -111,42 +146,51 @@ async function commonCrawlUrls(baseUrl) {
 
 async function waybackUrls(baseUrl) {
   const base = new URL(baseUrl);
-  const query = new URL('https://web.archive.org/cdx/search/cdx');
+  const hosts = new Set([
+    base.hostname,
+    `www.${canonicalHost(base.hostname)}`
+  ]);
   const urls = new Set();
 
-  query.searchParams.set('url', `${base.hostname}/*`);
-  query.searchParams.set('matchType', 'prefix');
-  query.searchParams.set('output', 'json');
-  query.searchParams.set('fl', 'original');
-  query.searchParams.set('filter', 'statuscode:200');
-  query.searchParams.set('collapse', 'urlkey');
-  query.searchParams.set('limit', '5000');
+  for (const host of hosts) {
+    const query = new URL('https://web.archive.org/cdx/search/cdx');
+    query.searchParams.set('url', `${host}/*`);
+    query.searchParams.set('matchType', 'prefix');
+    query.searchParams.set('output', 'json');
+    query.searchParams.set('fl', 'original');
+    query.searchParams.set('filter', 'statuscode:200');
+    query.searchParams.set('collapse', 'urlkey');
+    query.searchParams.set('limit', '5000');
 
-  const text = await fetchText(query.toString());
-  let rows;
+    const text = await fetchText(query.toString());
+    let rows;
 
-  try {
-    rows = JSON.parse(text);
-  } catch {
-    return urls;
-  }
+    try {
+      rows = JSON.parse(text);
+    } catch {
+      continue;
+    }
 
-  if (!Array.isArray(rows) || rows.length < 2) return urls;
+    if (!Array.isArray(rows) || rows.length < 2) continue;
 
-  const header = Array.isArray(rows[0]) ? rows[0] : [];
-  const originalIndex = header.indexOf('original');
+    const header = Array.isArray(rows[0]) ? rows[0] : [];
+    const originalIndex = header.indexOf('original');
 
-  for (const row of rows.slice(1)) {
-    const value = originalIndex >= 0 ? row[originalIndex] : row[0];
-    add(urls, value, baseUrl);
+    for (const row of rows.slice(1)) {
+      const value = originalIndex >= 0 ? row[originalIndex] : row[0];
+      add(urls, value, baseUrl);
+    }
   }
 
   return urls;
 }
 
-export async function discoverPublicPaths(baseUrl, browserUrls = []) {
+export async function discoverPublicPaths(baseUrl, browserUrls = [], seedUrls = []) {
   const discovered = new Set();
-  for (const url of browserUrls) add(discovered, url, baseUrl);
+
+  for (const url of [...browserUrls, ...seedUrls]) {
+    add(discovered, url, baseUrl);
+  }
 
   const sources = [
     ['sitemap', sitemapUrls(baseUrl)],
