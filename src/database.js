@@ -104,3 +104,10 @@ export function countStoredPaths(targetId) {
   
   return result.count;
 }
+
+export function removeUrlsByPattern(targetId, pattern) {
+  const stmt = db.prepare('DELETE FROM paths WHERE target_id = ? AND url LIKE ?');
+  const result = stmt.run(targetId, `%${pattern}%`);
+  console.log(`[db] removed ${result.changes} URLs matching "${pattern}" from target ${targetId}`);
+  return result.changes;
+}
