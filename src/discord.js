@@ -1,4 +1,5 @@
 import {
+  AttachmentBuilder,
   ChannelType,
   Client,
   GatewayIntentBits,
@@ -10,6 +11,7 @@ import {
 import { config } from './config.js';
 import {
   disableTarget,
+  getStoredPaths,
   getTargets,
   upsertTarget
 } from './database.js';
@@ -32,6 +34,15 @@ export const commands = [
   new SlashCommandBuilder()
     .setName('watchlist')
     .setDescription('List monitored targets'),
+  new SlashCommandBuilder()
+    .setName('path')
+    .setDescription('List currently monitored path targets'),
+  new SlashCommandBuilder()
+    .setName('scan2')
+    .setDescription('Export all stored URL paths as text'),
+  new SlashCommandBuilder()
+    .setName('testalert2')
+    .setDescription('Send a test new-path alert'),
   new SlashCommandBuilder()
     .setName('check')
     .setDescription('Check all monitored targets now')
@@ -60,6 +71,21 @@ async function alertChannel() {
   return channel;
 }
 
+function pathFile(target, paths) {
+  const header = [
+    `URL path scan for ${target.name}`,
+    `Base URL: ${target.url}`,
+    `Generated: ${new Date().toISOString()}`,
+    `Total paths: ${paths.length}`,
+    '',
+    'Paths:',
+    ''
+  ].join('\n');
+
+  const body = paths.map(item => item.url).join('\n');
+  return Buffer.from(`${header}${body}\n`, 'utf8');
+}
+
 async function sendResults(target, results) {
   if (!results.length) return;
 
@@ -74,6 +100,18 @@ async function sendResults(target, results) {
 
   await channel.send({
     content: `${mention}**${target.name}**\n${lines.join('\n')}`,
+    allowedMentions: {
+      roles: config.alertRoleId ? [config.alertRoleId] : []
+    }
+  });
+}
+
+async function sendTestAlert() {
+  const channel = await alertChannel();
+  const mention = config.alertRoleId ? `<@&${config.alertRoleId}> ` : '';
+
+  await channel.send({
+    content: `${mention}🧪 **Test new URL path alert**\n🆕 **New path** — <https://example.com/test-new-path>`,
     allowedMentions: {
       roles: config.alertRoleId ? [config.alertRoleId] : []
     }
@@ -114,6 +152,7 @@ export async function startDiscord() {
         }
 
         parsed.hash = '';
+        parsed.search = '';
         upsertTarget(name, parsed.toString());
 
         return interaction.reply({
@@ -128,14 +167,45 @@ export async function startDiscord() {
         return interaction.reply({ content: `Stopped **${name}**.`, ephemeral: true });
       }
 
-      if (interaction.commandName === 'watchlist') {
+      if (interaction.commandName === 'watchlist' || interaction.commandName === 'path') {
         const targets = getTargets();
         return interaction.reply({
           content: targets.length
-            ? targets.map(target => `• **${target.name}** — <${target.url}>`).join('\n')
-            : 'No path targets are being monitored.',
+            ? [
+                '**Currently monitored path targets**',
+                ...targets.map(target => `• **${target.name}** — <${target.url}>`)
+              ].join('\n')
+            : 'No websites are currently monitored.',
           ephemeral: true
         });
+      }
+
+      if (interaction.commandName === 'scan2') {
+        await interaction.deferReply({ ephemeral: true });
+
+        const targets = getTargets();
+        if (!targets.length) {
+          return interaction.editReply('No websites are currently monitored.');
+        }
+
+        const files = targets.map(target => {
+          const paths = getStoredPaths(target.id);
+          return new AttachmentBuilder(
+            pathFile(target, paths),
+            { name: `${target.name}-paths.txt` }
+          );
+        });
+
+        return interaction.editReply({
+          content: `Exported all stored URL paths for ${targets.length} monitored target(s).`,
+          files
+        });
+      }
+
+      if (interaction.commandName === 'testalert2') {
+        await interaction.deferReply({ ephemeral: true });
+        await sendTestAlert();
+        return interaction.editReply('Test new-path alert sent.');
       }
 
       if (interaction.commandName === 'check') {
