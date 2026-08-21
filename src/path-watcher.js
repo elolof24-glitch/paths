@@ -17,170 +17,170 @@ function normalizeUrl(value, baseUrl) {
 
     url.hash = '';
     url.search = '';
+    return url.toString();
+  } catch {
+    return null;
   }
 }
 
 function isTrackablePath(pathname) {
-  return !/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt)$/i.test(pathname);
+  return !/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt|json)$/i.test(pathname);
 }
-function trackable(url, baseUrl) {
-  const normalized = normalizeUrl(url, baseUrl);
+
+function trackable(value, baseUrl) {
+  const normalized = normalizeUrl(value, baseUrl);
   if (!normalized) return null;
 
-function addUrl(value, baseUrl, discovered) {
-  const url = normalizeUrl(value, baseUrl);
-  if (!url) return;
-  const pathname = new URL(normalized).pathname;
-  if (/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt)$/i.test(pathname)) {
-    return null;
-  }
+  const pathname = new URL(normalized).pathname || '/';
+  return isTrackablePath(pathname) ? normalized : null;
+}
 
-  const pathname = new URL(url).pathname || '/';
-  if (isTrackablePath(pathname)) discovered.add(url);
-  return normalized;
+function addUrl(value, baseUrl, discovered) {
+  const url = trackable(value, baseUrl);
+  if (url) discovered.add(url);
 }
 
 function extractRoutes(text, baseUrl, discovered) {
   if (!text) return;
 
   for (const value of text.match(/https?:\/\/[^\s"'<>\\]+/g) || []) {
-    addUrl(value, baseUrl, discovered);
-async function getCommonCrawlUrls(baseUrl) {
-  const host = new URL(baseUrl).hostname;
-  const indexList = await fetch('https://index.commoncrawl.org/collinfo.json')
-    .then(response => response.json())
-    .catch(() => []);
-
-  const latest = indexList[0]?.cdx-api;
-  if (!latest) return [];
-
-  const query = new URL(latest);
-  query.searchParams.set('url', `${host}/*`);
-  query.searchParams.set('output', 'json');
-  query.searchParams.set('fl', 'url,status,mime');
-  query.searchParams.set('filter', 'status:200');
-  query.searchParams.set('collapse', 'urlkey');
-  query.searchParams.set('pageSize', '5000');
-
-  const text = await fetch(query).then(response => response.text()).catch(() => '');
-  const urls = [];
-
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-
-    try {
-      const row = JSON.parse(line);
-      if (row.url) urls.push(row.url);
-    } catch {}
+    addUrl(value.replace(/[),.;]+$/, ''), baseUrl, discovered);
   }
 
   for (const value of text.match(/(?:["'`])\/(?!\/)[a-zA-Z0-9][a-zA-Z0-9_./-]{1,160}/g) || []) {
     addUrl(value.slice(1), baseUrl, discovered);
   }
-  return urls;
 }
 
-async function getSitemapUrls(baseUrl) {
-  const sitemapUrls = new Set([
-    new URL('/sitemap.xml', baseUrl).toString(),
-    new URL('/sitemap_index.xml', baseUrl).toString(),
-    new URL('/sitemap-index.xml', baseUrl).toString()
-  ]);
-  const base = new URL(baseUrl);
-  const candidates = [
-    new URL('/sitemap.xml', base).toString(),
-    new URL('/sitemap_index.xml', base).toString(),
-    new URL('/sitemap-index.xml', base).toString()
-  ];
+async function fetchText(url) {
+  const response = await fetch(url, {
+    headers: { 'user-agent': 'paths-v2/1.0' },
+    signal: AbortSignal.timeout(30_000)
+  }).catch(() => null);
 
-  const robots = await fetch(new URL('/robots.txt', baseUrl)).then(response => response.text()).catch(() => '');
-  const robots = await fetch(new URL('/robots.txt', base))
-    .then(response => response.text())
-    .catch(() => '');
+  if (!response || !response.ok) return '';
+  return response.text().catch(() => '');
+}
 
-  for (const line of robots.split(/\r?\n/)) {
-    if (line.toLowerCase().startsWith('sitemap:')) {
-      sitemapUrls.add(line.slice(line.indexOf(':') + 1).trim());
-      candidates.push(line.slice(line.indexOf(':') + 1).trim());
+async function getCommonCrawlUrls(baseUrl) {
+  const host = new URL(baseUrl).hostname;
+  const indexList = JSON.parse(await fetchText('https://index.commoncrawl.org/collinfo.json') || '[]');
+  const urls = new Set();
+
+  for (const collection of indexList.slice(0, 3)) {
+    const endpoint = collection?.cdx_api || collection?.['cdx-api'];
+    if (!endpoint) continue;
+
+    const query = new URL(endpoint);
+    query.searchParams.set('url', `${host}/*`);
+    query.searchParams.set('output', 'json');
+    query.searchParams.set('fl', 'url,status');
+    query.searchParams.set('filter', 'status:200');
+    query.searchParams.set('collapse', 'urlkey');
+    query.searchParams.set('pageSize', '5000');
+
+    const text = await fetchText(query.toString());
+
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+
+      try {
+        const row = JSON.parse(line);
+        if (row.url) {
+          const url = trackable(row.url, baseUrl);
+          if (url) urls.add(url);
+        }
+      } catch {}
     }
   }
 
-  const found = new Set();
+  return [...urls];
+}
+
+async function getSitemapUrls(baseUrl) {
+  const base = new URL(baseUrl);
+  const queue = new Set([
+    new URL('/sitemap.xml', base).toString(),
+    new URL('/sitemap_index.xml', base).toString(),
+    new URL('/sitemap-index.xml', base).toString()
+  ]);
+  const robots = await fetchText(new URL('/robots.txt', base));
+
+  for (const line of robots.split(/\r?\n/)) {
+    if (line.toLowerCase().startsWith('sitemap:')) {
+      queue.add(line.slice(line.indexOf(':') + 1).trim());
+    }
+  }
+
   const visited = new Set();
   const urls = new Set();
 
-  async function readSitemap(sitemapUrl, depth = 0) {
-    if (depth > 2 || found.has(sitemapUrl)) return;
-    found.add(sitemapUrl);
-  async function readSitemap(url, depth = 0) {
-    if (depth > 2 || visited.has(url)) return;
-    visited.add(url);
+  while (queue.size && visited.size < 100) {
+    const sitemapUrl = queue.values().next().value;
+    queue.delete(sitemapUrl);
+    if (visited.has(sitemapUrl)) continue;
+    visited.add(sitemapUrl);
 
-    const xml = await fetch(sitemapUrl).then(response => response.text()).catch(() => '');
-    const xml = await fetch(url).then(response => response.text()).catch(() => '');
-    if (!xml) return;
+    const xml = await fetchText(sitemapUrl);
+    if (!xml) continue;
 
-    for (const value of xml.match(/<loc>[^<]+<\/loc>/g) || []) {
-      const location = value.replace(/<\/?loc>/g, '').trim();
     for (const match of xml.match(/<loc>[^<]+<\/loc>/g) || []) {
       const location = match.replace(/<\/?loc>/g, '').trim();
 
-      if (/sitemap/i.test(location) || /<sitemap/i.test(xml)) {
       if (/sitemap/i.test(location)) {
-        await readSitemap(location, depth + 1);
+        queue.add(location);
       } else {
-        found.add(location);
-        urls.add(location);
+        const url = trackable(location, baseUrl);
+        if (url) urls.add(url);
       }
     }
   }
 
-  for (const sitemapUrl of sitemapUrls) {
-    await readSitemap(sitemapUrl);
-  }
-
-  return [...found];
-  for (const candidate of candidates) await readSitemap(candidate);
   return [...urls];
 }
 
 export async function scanPaths(target) {
-@@ -104,62 +125,61 @@
+  const browser = await chromium.launch({ headless: true });
+
+  try {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (compatible; paths-v2/1.0)'
+    });
+    const page = await context.newPage();
+    const base = new URL(target.url);
+    const discovered = new Set([base.toString()]);
+
+    const response = await page.goto(target.url, {
+      waitUntil: 'domcontentloaded',
       timeout: 45_000
     });
 
     await page.waitForTimeout(5_000);
-    await page.waitForTimeout(5000);
 
     const links = await page.locator('a[href]').evaluateAll(
       nodes => nodes.map(node => node.href)
     );
 
     for (const link of links) addUrl(link, base.toString(), discovered);
-
     extractRoutes(await page.content(), base.toString(), discovered);
 
-    const resourceEntries = await page.evaluate(() =>
+    const resources = await page.evaluate(() =>
       performance.getEntriesByType('resource').map(entry => entry.name)
     );
-    for (const link of links) {
-      const url = trackable(link, base.toString());
-      if (url) discovered.add(url);
-    }
 
-    for (const resource of resourceEntries) {
+    for (const resource of resources) {
       addUrl(resource, base.toString(), discovered);
-    for (const url of await getSitemapUrls(base.toString())) {
-      const trackableUrl = trackable(url, base.toString());
-      if (trackableUrl) discovered.add(trackableUrl);
     }
 
-    for (const sitemapUrl of await getSitemapUrls(base.toString())) {
-      addUrl(sitemapUrl, base.toString(), discovered);
-    for (const url of await getCommonCrawlUrls(base.toString())) {
-      const trackableUrl = trackable(url, base.toString());
-      if (trackableUrl) discovered.add(trackableUrl);
+    for (const url of await getSitemapUrls(base.toString())) {
+      discovered.add(url);
     }
+
+    for (const url of await getCommonCrawlUrls(base.toString())) {
+      discovered.add(url);
+    }
+
+    console.log(`[paths] ${target.name}: ${discovered.size} candidate(s)`);
 
     const results = [];
 
