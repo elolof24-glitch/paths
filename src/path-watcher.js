@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { chromium } from 'playwright';
-import { savePath } from './database.js';
+import { savePath, countStoredPaths } from './database.js';
 import { discoverPublicPaths } from './discovery.js';
 
 function digest(value) {
@@ -46,11 +46,14 @@ export async function scanPaths(target) {
     const base = new URL(target.url);
     const discovered = new Set([base.toString()]);
 
+    console.log(`[paths] starting ${target.name}: ${target.url}`);
+
     const response = await page.goto(target.url, {
       waitUntil: 'domcontentloaded',
       timeout: 45_000
     });
 
+    console.log(`[paths] homepage status: ${response?.status() ?? 'none'}`);
     await page.waitForTimeout(5000);
 
     const links = await page.locator('a[href]').evaluateAll(
@@ -61,23 +64,29 @@ export async function scanPaths(target) {
       .map(link => trackable(link, base.toString()))
       .filter(Boolean);
 
-    for (const url of browserUrls) {
-      discovered.add(url);
+    console.log(`[paths] browser candidates: ${browserUrls.length}`);
+
+    for (const url of browserUrls) discovered.add(url);
+
+    let publicUrls = [];
+
+    try {
+      publicUrls = await discoverPublicPaths(
+        base.toString(),
+        browserUrls
+      );
+    } catch (error) {
+      console.error(`[paths] discovery failed: ${error.message}`);
     }
 
-    const publicUrls = await discoverPublicPaths(
-      base.toString(),
-      browserUrls
-    );
+    console.log(`[paths] external candidates: ${publicUrls.length}`);
 
     for (const url of publicUrls) {
       const trackableUrl = trackable(url, base.toString());
       if (trackableUrl) discovered.add(trackableUrl);
     }
 
-    console.log(
-      `[paths] ${target.name}: ${discovered.size} public path candidate(s)`
-    );
+    console.log(`[paths] total candidates: ${discovered.size}`);
 
     const results = [];
 
@@ -92,7 +101,10 @@ export async function scanPaths(target) {
         const request = await context.request.get(url, {
           timeout: 20_000,
           failOnStatusCode: false
-        }).catch(() => null);
+        }).catch(error => {
+          console.error(`[paths] request failed ${url}: ${error.message}`);
+          return null;
+        });
 
         status = request?.status() ?? null;
         body = request ? await request.text().catch(() => '') : '';
@@ -106,10 +118,16 @@ export async function scanPaths(target) {
         contentHash: digest(body)
       });
 
+      console.log(`[paths] saved ${result.type}: ${url} (${status ?? 'unknown'})`);
+
       if (result.type !== 'unchanged') {
         results.push({ type: result.type, url, status });
       }
     }
+
+    console.log(
+      `[paths] finished ${target.name}: discovered=${discovered.size}, stored=${countStoredPaths(target.id)}, changes=${results.length}`
+    );
 
     return results;
   } finally {
