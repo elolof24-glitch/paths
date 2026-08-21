@@ -17,7 +17,7 @@ db.exec(`
     url TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_scan_at TEXT DEFAULT CURRENT_TIMESTAMP
+    last_scan_at TEXT DEFAULT '1970-01-01T00:00:00.000Z'
   );
 
   CREATE TABLE IF NOT EXISTS paths (
@@ -40,7 +40,7 @@ try {
 } catch (error) {
   if (error.message.includes('no such column')) {
     console.log('[db] adding last_scan_at column to targets table');
-    db.exec(`ALTER TABLE targets ADD COLUMN last_scan_at TEXT DEFAULT CURRENT_TIMESTAMP`);
+    db.exec(`ALTER TABLE targets ADD COLUMN last_scan_at TEXT DEFAULT '1970-01-01T00:00:00.000Z'`);
   }
 }
 
