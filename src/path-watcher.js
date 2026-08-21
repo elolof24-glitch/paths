@@ -17,7 +17,6 @@ function normalizeUrl(value, baseUrl) {
 
     url.hash = '';
     url.search = '';
-@@ -22,70 +22,91 @@
   }
 }
 
