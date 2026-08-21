@@ -128,19 +128,29 @@ async function sendTestAlert() {
 }
 
 export async function checkAll() {
+  console.log('[scan] starting all scans');
+  
   for (const target of getTargets()) {
     try {
+      console.log(`[scan] starting ${target.name}`);
       const results = await scanPaths(target);
-      await sendResults(target, results);
-      console.log(`${target.name}: ${results.length} new or changed path(s)`);
+      
+      if (results.changes && results.changes.length > 0) {
+        await sendResults(target, results.changes);
+      }
+      
+      console.log(`${target.name}: ${results.changes?.length || 0} new or changed path(s)`);
     } catch (error) {
       console.error(`${target.name}: ${error.message}`);
+      console.error(error.stack);
     }
   }
+  
+  console.log('[scan] all scans completed');
 }
 
 export async function startDiscord() {
-  client.once('ready', async () => {
+  client.once('clientReady', async () => {
     await registerCommands();
     console.log(`Logged in as ${client.user.tag}`);
     await checkAll();
