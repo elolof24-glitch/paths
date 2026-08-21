@@ -8,6 +8,7 @@ import { fetchWayback } from './discovery/wayback.js';
 
 const MAX_PAGES = 50;
 const MAX_URLS = 1000;
+const MAX_AGE_DAYS = 30; // Only URLs from last 30 days
 
 function hash(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -43,6 +44,19 @@ function crawlable(url) {
   );
 }
 
+function recentPath(url) {
+  // Skip paths that look old/archived
+  // This is a simple heuristic - skip if path contains old date patterns
+  const pathname = new URL(url).pathname.toLowerCase();
+  
+  // Skip paths with old year patterns like /2020/, /2021/, /2022/, /2023/, /2024/
+  if (/\/202[0-4]\//.test(pathname)) {
+    return false;
+  }
+  
+  return true;
+}
+
 export async function scanPaths(target) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -61,25 +75,25 @@ export async function scanPaths(target) {
     // 1. robots.txt
     const robotsUrls = await fetchRobotsTxt(baseUrl);
     for (const url of robotsUrls) {
-      add(discovered, url, baseUrl);
+      if (recentPath(url)) add(discovered, url, baseUrl);
     }
 
     // 2. sitemaps
     const sitemapUrls = await fetchSitemaps(baseUrl);
     for (const url of sitemapUrls) {
-      add(discovered, url, baseUrl);
+      if (recentPath(url)) add(discovered, url, baseUrl);
     }
 
     // 3. Common Crawl
     const ccUrls = await fetchCommonCrawl(baseUrl);
     for (const url of ccUrls) {
-      add(discovered, url, baseUrl);
+      if (recentPath(url)) add(discovered, url, baseUrl);
     }
 
     // 4. Wayback
     const wbUrls = await fetchWayback(baseUrl);
     for (const url of wbUrls) {
-      add(discovered, url, baseUrl);
+      if (recentPath(url)) add(discovered, url, baseUrl);
     }
 
     // === Existing: seeds and crawling ===
