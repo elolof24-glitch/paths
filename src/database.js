@@ -34,6 +34,16 @@ db.exec(`
   );
 `);
 
+// Migration: add last_scan_at column if it doesn't exist
+try {
+  db.prepare('SELECT last_scan_at FROM targets LIMIT 1').get();
+} catch (error) {
+  if (error.message.includes('no such column')) {
+    console.log('[db] adding last_scan_at column to targets table');
+    db.exec(`ALTER TABLE targets ADD COLUMN last_scan_at TEXT DEFAULT CURRENT_TIMESTAMP`);
+  }
+}
+
 export function upsertTarget(name, url) {
   return db.prepare(`
     INSERT INTO targets (name, url)
