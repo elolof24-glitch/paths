@@ -22,14 +22,92 @@ function normalize(value, baseUrl) {
 
 async function fetchText(url) {
   const response = await fetch(url, {
-    headers: {
-      'user-agent': 'paths-v2/1.0'
-    },
+    headers: { 'user-agent': 'paths-v2/1.0' },
     signal: AbortSignal.timeout(30_000)
   }).catch(() => null);
 
   if (!response || !response.ok) return '';
   return response.text().catch(() => '');
+}
+
+function parseJsonLines(text) {
+  const rows = [];
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+
+    try {
+      rows.push(JSON.parse(line));
+    } catch {}
+  }
+
+  return rows;
+}
+
+async function commonCrawlDiscovery(baseUrl) {
+  const base = new URL(baseUrl);
+  const collections = JSON.parse(
+    await fetchText('https://index.commoncrawl.org/collinfo.json') || '[]'
+  );
+
+  const results = new Set();
+
+  for (const collection of collections.slice(0, 3)) {
+    if (!collection?.cdx_api) continue;
+
+    const query = new URL(collection.cdx_api);
+    query.searchParams.set('url', `${base.hostname}/*`);
+    query.searchParams.set('output', 'json');
+    query.searchParams.set('fl', 'url,status');
+    query.searchParams.set('filter', 'status:200');
+    query.searchParams.set('collapse', 'urlkey');
+    query.searchParams.set('pageSize', '5000');
+
+    const text = await fetchText(query.toString());
+
+    for (const row of parseJsonLines(text)) {
+      const normalized = normalize(row.url, baseUrl);
+      if (normalized) results.add(normalized);
+    }
+  }
+
+  return results;
+}
+
+async function waybackDiscovery(baseUrl) {
+  const base = new URL(baseUrl);
+  const results = new Set();
+  const query = new URL('https://web.archive.org/cdx/search/cdx');
+
+  query.searchParams.set('url', `${base.hostname}/*`);
+  query.searchParams.set('matchType', 'prefix');
+  query.searchParams.set('output', 'json');
+  query.searchParams.set('fl', 'original,statuscode');
+  query.searchParams.set('filter', 'statuscode:200');
+  query.searchParams.set('collapse', 'urlkey');
+  query.searchParams.set('limit', '5000');
+
+  const text = await fetchText(query.toString());
+  let parsed;
+
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+
+  if (Array.isArray(parsed)) {
+    const header = parsed[0];
+    const originalIndex = header?.indexOf('original');
+
+    for (const row of parsed.slice(1)) {
+      const original = originalIndex >= 0 ? row[originalIndex] : row[0];
+      const normalized = normalize(original, baseUrl);
+      if (normalized) results.add(normalized);
+    }
+  }
+
+  return results;
 }
 
 async function sitemapDiscovery(baseUrl) {
@@ -40,7 +118,7 @@ async function sitemapDiscovery(baseUrl) {
     new URL('/sitemap-index.xml', base).toString()
   ]);
   const visited = new Set();
-  const urls = new Set();
+  const results = new Set();
 
   const robots = await fetchText(new URL('/robots.txt', base));
   for (const line of robots.split(/\r?\n/)) {
@@ -49,7 +127,7 @@ async function sitemapDiscovery(baseUrl) {
     }
   }
 
-  while (queue.size && visited.size < 100) {
+  while (queue.size && visited.size < 200) {
     const sitemapUrl = queue.values().next().value;
     queue.delete(sitemapUrl);
     if (visited.has(sitemapUrl)) continue;
@@ -65,96 +143,36 @@ async function sitemapDiscovery(baseUrl) {
         queue.add(value);
       } else {
         const normalized = normalize(value, baseUrl);
-        if (normalized) urls.add(normalized);
+        if (normalized) results.add(normalized);
       }
     }
   }
 
-  return urls;
-}
-
-async function commonCrawlDiscovery(baseUrl) {
-  const base = new URL(baseUrl);
-  const indexes = await fetchText('https://index.commoncrawl.org/collinfo.json');
-  let latest;
-
-  try {
-    latest = JSON.parse(indexes)[0]?.cdx-api;
-  } catch {
-    return new Set();
-  }
-
-  if (!latest) return new Set();
-
-  const query = new URL(latest);
-  query.searchParams.set('url', `${base.hostname}/*`);
-  query.searchParams.set('output', 'json');
-  query.searchParams.set('fl', 'url,status');
-  query.searchParams.set('filter', 'status:200');
-  query.searchParams.set('collapse', 'urlkey');
-  query.searchParams.set('pageSize', '5000');
-
-  const body = await fetchText(query.toString());
-  const urls = new Set();
-
-  for (const line of body.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-
-    try {
-      const row = JSON.parse(line);
-      const normalized = normalize(row.url, baseUrl);
-      if (normalized) urls.add(normalized);
-    } catch {}
-  }
-
-  return urls;
-}
-
-async function waybackDiscovery(baseUrl) {
-  const base = new URL(baseUrl);
-  const query = new URL('https://web.archive.org/cdx/search/cdx');
-  query.searchParams.set('url', `${base.hostname}/*`);
-  query.searchParams.set('matchType', 'prefix');
-  query.searchParams.set('output', 'json');
-  query.searchParams.set('fl', 'original,statuscode');
-  query.searchParams.set('filter', 'statuscode:200');
-  query.searchParams.set('collapse', 'urlkey');
-  query.searchParams.set('limit', '5000');
-
-  const body = await fetchText(query.toString());
-  const urls = new Set();
-
-  for (const line of body.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-
-    try {
-      const row = JSON.parse(line);
-      const original = Array.isArray(row) ? row[0] : row.original;
-      const normalized = normalize(original, baseUrl);
-      if (normalized) urls.add(normalized);
-    } catch {}
-  }
-
-  return urls;
+  return results;
 }
 
 export async function discoverPublicPaths(baseUrl, browserUrls = []) {
-  const paths = new Set();
-
-  for (const url of browserUrls) {
-    const normalized = normalize(url, baseUrl);
-    if (normalized) paths.add(normalized);
-  }
-
-  const [sitemaps, commonCrawl, wayback] = await Promise.all([
+  const sources = await Promise.allSettled([
     sitemapDiscovery(baseUrl),
     commonCrawlDiscovery(baseUrl),
     waybackDiscovery(baseUrl)
   ]);
 
-  for (const collection of [sitemaps, commonCrawl, wayback]) {
-    for (const url of collection) paths.add(url);
+  const results = new Set();
+
+  for (const value of browserUrls) {
+    const normalized = normalize(value, baseUrl);
+    if (normalized) results.add(normalized);
   }
 
-  return [...paths];
+  for (const source of sources) {
+    if (source.status !== 'fulfilled') continue;
+    for (const url of source.value) results.add(url);
+  }
+
+  console.log(
+    `[discovery] ${baseUrl}: ${results.size} public path candidate(s)`
+  );
+
+  return [...results];
 }
