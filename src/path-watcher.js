@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { chromium } from 'playwright';
-import { savePath, getNewPathsSinceLastScan, updateLastScan } from './database.js';
+import { savePath, getNewPathsSinceLastScan, updateLastScan, getBlacklist } from './database.js';
 import { fetchRobotsTxt } from './discovery/robots.js';
 import { fetchSitemaps } from './discovery/sitemaps.js';
 import { fetchCommonCrawl } from './discovery/commoncrawl.js';
@@ -55,7 +55,6 @@ function recentPath(url) {
   try {
     const pathname = new URL(url).pathname.toLowerCase();
     
-    // Skip paths with old year patterns
     if (/\/202[0-4]\//.test(pathname)) {
       return false;
     }
@@ -78,31 +77,38 @@ export async function scanPaths(target) {
   try {
     const baseUrl = target.url;
     const seeds = Array.isArray(target.seeds) ? target.seeds : [];
+    
+    // Get blacklist for this target
+    const blacklist = getBlacklist(target.id);
+    
+    function isBlacklisted(url) {
+      return blacklist.some(pattern => url.includes(pattern));
+    }
 
     // === V2: Multi-source discovery ===
     
     // 1. robots.txt
     const robotsUrls = await fetchRobotsTxt(baseUrl);
     for (const url of robotsUrls) {
-      if (recentPath(url)) add(discovered, url, baseUrl);
+      if (recentPath(url) && !isBlacklisted(url)) add(discovered, url, baseUrl);
     }
 
     // 2. sitemaps
     const sitemapUrls = await fetchSitemaps(baseUrl);
     for (const url of sitemapUrls) {
-      if (recentPath(url)) add(discovered, url, baseUrl);
+      if (recentPath(url) && !isBlacklisted(url)) add(discovered, url, baseUrl);
     }
 
     // 3. Common Crawl
     const ccUrls = await fetchCommonCrawl(baseUrl);
     for (const url of ccUrls) {
-      if (recentPath(url)) add(discovered, url, baseUrl);
+      if (recentPath(url) && !isBlacklisted(url)) add(discovered, url, baseUrl);
     }
 
     // 4. Wayback
     const wbUrls = await fetchWayback(baseUrl);
     for (const url of wbUrls) {
-      if (recentPath(url)) add(discovered, url, baseUrl);
+      if (recentPath(url) && !isBlacklisted(url)) add(discovered, url, baseUrl);
     }
 
     // === Existing: seeds and crawling ===
@@ -112,7 +118,7 @@ export async function scanPaths(target) {
 
     for (const seed of seeds) {
       const url = add(discovered, seed, baseUrl);
-      if (url) queue.push(url);
+      if (url && !isBlacklisted(url)) queue.push(url);
     }
 
     while (queue.length && visited.size < MAX_PAGES) {
@@ -132,7 +138,7 @@ export async function scanPaths(target) {
         await page.waitForTimeout(2_000);
 
         const finalUrl = add(discovered, page.url(), baseUrl);
-        if (finalUrl && crawlable(finalUrl) && !visited.has(finalUrl)) {
+        if (finalUrl && crawlable(finalUrl) && !visited.has(finalUrl) && !isBlacklisted(finalUrl)) {
           queue.push(finalUrl);
         }
 
@@ -142,7 +148,7 @@ export async function scanPaths(target) {
 
         for (const href of hrefs) {
           const found = add(discovered, href, baseUrl);
-          if (found && crawlable(found) && !visited.has(found)) {
+          if (found && crawlable(found) && !visited.has(found) && !isBlacklisted(found)) {
             queue.push(found);
           }
         }
@@ -157,8 +163,13 @@ export async function scanPaths(target) {
 
     console.log(`[paths] discovered=${discovered.size}`);
 
-    // Save all discovered paths
+    // Save all discovered paths (excluding blacklisted)
     for (const url of discovered) {
+      if (isBlacklisted(url)) {
+        console.log(`[blacklist] skipping ${url}`);
+        continue;
+      }
+      
       const request = await context.request.get(url, {
         timeout: 20_000,
         failOnStatusCode: false
