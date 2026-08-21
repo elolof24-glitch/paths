@@ -1,3 +1,6 @@
+import 'dotenv/config';
 import { startDiscord } from './src/discord.js';
 
-await startDiscord()
+console.log('[startup] starting Discord bot');
+
+await startDiscord();
