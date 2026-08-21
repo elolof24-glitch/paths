@@ -22,52 +22,70 @@ function normalizeUrl(value, baseUrl) {
   }
 }
 
-function addRouteCandidate(value, baseUrl, discovered) {
+function isTrackablePath(pathname) {
+  return !/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt)$/i.test(pathname);
+}
+
+function addUrl(value, baseUrl, discovered) {
   const url = normalizeUrl(value, baseUrl);
   if (!url) return;
 
-  const pathname = new URL(url).pathname;
-  if (pathname === '/' || pathname.length > 1) {
-    discovered.add(url);
+  const pathname = new URL(url).pathname || '/';
+  if (isTrackablePath(pathname)) discovered.add(url);
+}
+
+function extractRoutes(text, baseUrl, discovered) {
+  if (!text) return;
+
+  for (const value of text.match(/https?:\/\/[^\s"'<>\\]+/g) || []) {
+    addUrl(value, baseUrl, discovered);
+  }
+
+  for (const value of text.match(/(?:["'`])\/(?!\/)[a-zA-Z0-9][a-zA-Z0-9_./-]{1,160}/g) || []) {
+    addUrl(value.slice(1), baseUrl, discovered);
   }
 }
 
-function extractStringRoutes(value, baseUrl, discovered) {
-  if (typeof value !== 'string') return;
+async function getSitemapUrls(baseUrl) {
+  const sitemapUrls = new Set([
+    new URL('/sitemap.xml', baseUrl).toString(),
+    new URL('/sitemap_index.xml', baseUrl).toString(),
+    new URL('/sitemap-index.xml', baseUrl).toString()
+  ]);
 
-  const absoluteMatches = value.match(/https?:\/\/[^\s"'<>\\]+/g) || [];
-  for (const match of absoluteMatches) {
-    addRouteCandidate(match, baseUrl, discovered);
-  }
+  const robots = await fetch(new URL('/robots.txt', baseUrl)).then(response => response.text()).catch(() => '');
 
-  const pathMatches = value.match(/(?:^|["'`])\/(?!\/)[a-zA-Z0-9][a-zA-Z0-9_./-]{1,120}/g) || [];
-  for (const match of pathMatches) {
-    addRouteCandidate(match.replace(/^["'`]/, ''), baseUrl, discovered);
-  }
-}
-
-function collectRoutes(value, baseUrl, discovered, depth = 0) {
-  if (depth > 5 || value == null) return;
-
-  if (typeof value === 'string') {
-    extractStringRoutes(value, baseUrl, discovered);
-    return;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) collectRoutes(item, baseUrl, discovered, depth + 1);
-    return;
-  }
-
-  if (typeof value === 'object') {
-    for (const item of Object.values(value)) {
-      collectRoutes(item, baseUrl, discovered, depth + 1);
+  for (const line of robots.split(/\r?\n/)) {
+    if (line.toLowerCase().startsWith('sitemap:')) {
+      sitemapUrls.add(line.slice(line.indexOf(':') + 1).trim());
     }
   }
-}
 
-function ignoredPath(pathname) {
-  return /\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map)$/i.test(pathname);
+  const found = new Set();
+
+  async function readSitemap(sitemapUrl, depth = 0) {
+    if (depth > 2 || found.has(sitemapUrl)) return;
+    found.add(sitemapUrl);
+
+    const xml = await fetch(sitemapUrl).then(response => response.text()).catch(() => '');
+    if (!xml) return;
+
+    for (const value of xml.match(/<loc>[^<]+<\/loc>/g) || []) {
+      const location = value.replace(/<\/?loc>/g, '').trim();
+
+      if (/sitemap/i.test(location) || /<sitemap/i.test(xml)) {
+        await readSitemap(location, depth + 1);
+      } else {
+        found.add(location);
+      }
+    }
+  }
+
+  for (const sitemapUrl of sitemapUrls) {
+    await readSitemap(sitemapUrl);
+  }
+
+  return [...found];
 }
 
 export async function scanPaths(target) {
@@ -88,56 +106,29 @@ export async function scanPaths(target) {
 
     await page.waitForTimeout(5_000);
 
-    const sameHostResponses = [];
-
-    page.on('response', networkResponse => {
-      try {
-        const url = new URL(networkResponse.url());
-        if (url.origin === base.origin) sameHostResponses.push(url.toString());
-      } catch {}
-    });
-
     const links = await page.locator('a[href]').evaluateAll(
       nodes => nodes.map(node => node.href)
     );
 
-    for (const link of links) addRouteCandidate(link, base.toString(), discovered);
+    for (const link of links) addUrl(link, base.toString(), discovered);
 
-    const html = await page.content();
-    extractStringRoutes(html, base.toString(), discovered);
+    extractRoutes(await page.content(), base.toString(), discovered);
 
-    for (const script of await page.locator('script').allTextContents()) {
-      extractStringRoutes(script, base.toString(), discovered);
-    }
-
-    const resourceEntries = await page.evaluate(() => {
-      const entries = performance.getEntriesByType('resource');
-      return entries.map(entry => entry.name);
-    });
+    const resourceEntries = await page.evaluate(() =>
+      performance.getEntriesByType('resource').map(entry => entry.name)
+    );
 
     for (const resource of resourceEntries) {
-      addRouteCandidate(resource, base.toString(), discovered);
+      addUrl(resource, base.toString(), discovered);
     }
 
-    for (const networkUrl of sameHostResponses) {
-      addRouteCandidate(networkUrl, base.toString(), discovered);
+    for (const sitemapUrl of await getSitemapUrls(base.toString())) {
+      addUrl(sitemapUrl, base.toString(), discovered);
     }
-
-    const routeManifest = await page.evaluate(() => ({
-      nextData: globalThis.__NEXT_DATA__ || null,
-      router: globalThis.__NUXT__ || null
-    })).catch(() => ({}));
-
-    collectRoutes(routeManifest, base.toString(), discovered);
-
-    const filtered = [...discovered].filter(url => {
-      const pathname = new URL(url).pathname;
-      return !ignoredPath(pathname);
-    });
 
     const results = [];
 
-    for (const url of filtered) {
+    for (const url of discovered) {
       let status = null;
       let body = '';
 
