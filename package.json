@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "npx playwright install chromium && node index.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",
