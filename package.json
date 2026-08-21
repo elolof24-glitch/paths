@@ -1,1 +1,15 @@
-
+{
+  "name": "paths-v2",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "discord.js": "^14.22.1",
+    "dotenv": "^17.2.1",
+    "playwright": "^1.55.0"
+  }
+}
