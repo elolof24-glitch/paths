@@ -14,7 +14,10 @@ import {
   getStoredPaths,
   getTargets,
   upsertTarget,
-  removeUrlsByPattern
+  removeUrlsByPattern,
+  addBlacklist,
+  getBlacklist,
+  removeBlacklist
 } from './database.js';
 import { scanPaths } from './path-watcher.js';
 
@@ -37,6 +40,20 @@ export const commands = [
     .setDescription('Remove URLs matching a pattern (e.g., USDT, BTC)')
     .addStringOption(option => option.setName('target').setDescription('Target name').setRequired(true))
     .addStringOption(option => option.setName('pattern').setDescription('Pattern to match (e.g., USDT, /convert/)').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('blacklist')
+    .setDescription('Add a URL pattern to blacklist')
+    .addStringOption(option => option.setName('target').setDescription('Target name').setRequired(true))
+    .addStringOption(option => option.setName('pattern').setDescription('Pattern to block (e.g., USDT, _USDT)').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('blacklist-list')
+    .setDescription('Show blacklisted patterns for a target')
+    .addStringOption(option => option.setName('target').setDescription('Target name').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('blacklist-remove')
+    .setDescription('Remove a pattern from blacklist')
+    .addStringOption(option => option.setName('target').setDescription('Target name').setRequired(true))
+    .addStringOption(option => option.setName('pattern').setDescription('Pattern to remove').setRequired(true)),
   new SlashCommandBuilder()
     .setName('watchlist')
     .setDescription('List monitored targets'),
@@ -109,7 +126,7 @@ function pathFile(target, paths) {
   ].join('\n');
 
   const body = paths.map(item => {
-    const age = item.discoveredAt ? timeAgo(new Date(item.discoveredAt)) : 'unknown';
+    const age = item.first_seen ? timeAgo(new Date(item.first_seen)) : 'unknown';
     return `${item.url} (${age})`;
   }).join('\n');
   
@@ -123,7 +140,7 @@ async function sendResults(target, results) {
   const lines = results.slice(0, 20).map(result => {
     const icon = result.type === 'new' ? '🆕' : '🟠';
     const label = result.type === 'new' ? 'New path' : 'Path changed';
-    const age = result.discoveredAt ? timeAgo(new Date(result.discoveredAt)) : 'just now';
+    const age = result.first_seen ? timeAgo(new Date(result.first_seen)) : 'just now';
     return `${icon} **${label}** — <${result.url}> (${result.status ?? 'unknown'}, ${age})`;
   });
 
@@ -223,6 +240,64 @@ export async function startDiscord() {
         
         return interaction.reply({
           content: `✅ Removed **${removed}** URL(s) matching \`${pattern}\` from **${targetName}**`,
+          ephemeral: true
+        });
+      }
+
+      if (interaction.commandName === 'blacklist') {
+        const targetName = interaction.options.getString('target').trim();
+        const pattern = interaction.options.getString('pattern').trim();
+        
+        const targets = getTargets();
+        const target = targets.find(t => t.name === targetName);
+        
+        if (!target) {
+          return interaction.reply({ content: `Target **${targetName}** not found.`, ephemeral: true });
+        }
+        
+        addBlacklist(target.id, pattern);
+        
+        return interaction.reply({
+          content: `✅ Added \`${pattern}\` to blacklist for **${targetName}**`,
+          ephemeral: true
+        });
+      }
+
+      if (interaction.commandName === 'blacklist-list') {
+        const targetName = interaction.options.getString('target').trim();
+        
+        const targets = getTargets();
+        const target = targets.find(t => t.name === targetName);
+        
+        if (!target) {
+          return interaction.reply({ content: `Target **${targetName}** not found.`, ephemeral: true });
+        }
+        
+        const patterns = getBlacklist(target.id);
+        
+        return interaction.reply({
+          content: patterns.length
+            ? `**Blacklist for ${targetName}**:\n${patterns.map(p => `• \`${p}\``).join('\n')}`
+            : `No blacklisted patterns for **${targetName}**`,
+          ephemeral: true
+        });
+      }
+
+      if (interaction.commandName === 'blacklist-remove') {
+        const targetName = interaction.options.getString('target').trim();
+        const pattern = interaction.options.getString('pattern').trim();
+        
+        const targets = getTargets();
+        const target = targets.find(t => t.name === targetName);
+        
+        if (!target) {
+          return interaction.reply({ content: `Target **${targetName}** not found.`, ephemeral: true });
+        }
+        
+        removeBlacklist(target.id, pattern);
+        
+        return interaction.reply({
+          content: `✅ Removed \`${pattern}\` from blacklist for **${targetName}**`,
           ephemeral: true
         });
       }
