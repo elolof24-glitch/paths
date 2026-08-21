@@ -1,0 +1,20 @@
+[
+  {
+    "name": "x.com",
+    "url": "https://x.com",
+    "maxPages": 500,
+    "autoScan": true
+  },
+  {
+    "name": "perplexity.ai",
+    "url": "https://www.perplexity.ai",
+    "maxPages": 500,
+    "autoScan": true
+  },
+  {
+    "name": "other-site",
+    "url": "https://other-site.com",
+    "maxPages": 500,
+    "autoScan": false  // Only scan when you run /check manually
+  }
+]
