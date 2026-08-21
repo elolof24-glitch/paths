@@ -6,16 +6,19 @@ import { fetchSitemaps } from './discovery/sitemaps.js';
 import { fetchCommonCrawl } from './discovery/commoncrawl.js';
 import { fetchWayback } from './discovery/wayback.js';
 
-const MAX_PAGES = 50;
-const MAX_URLS = 1000;
-const MAX_AGE_DAYS = 30; // Only URLs from last 30 days
+const MAX_PAGES = 30;
+const MAX_URLS = 500;
 
 function hash(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
 function host(value) {
-  return new URL(value).hostname.toLowerCase().replace(/^www\./, '');
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return '';
+  }
 }
 
 function normalize(value, baseUrl) {
@@ -39,22 +42,28 @@ function add(set, value, baseUrl) {
 }
 
 function crawlable(url) {
-  return !/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt|json|pdf|zip)$/i.test(
-    new URL(url).pathname
-  );
+  try {
+    return !/\.(?:css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map|xml|txt|json|pdf|zip)$/i.test(
+      new URL(url).pathname
+    );
+  } catch {
+    return false;
+  }
 }
 
 function recentPath(url) {
-  // Skip paths that look old/archived
-  // This is a simple heuristic - skip if path contains old date patterns
-  const pathname = new URL(url).pathname.toLowerCase();
-  
-  // Skip paths with old year patterns like /2020/, /2021/, /2022/, /2023/, /2024/
-  if (/\/202[0-4]\//.test(pathname)) {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    
+    // Skip paths with old year patterns
+    if (/\/202[0-4]\//.test(pathname)) {
+      return false;
+    }
+    
+    return true;
+  } catch {
     return false;
   }
-  
-  return true;
 }
 
 export async function scanPaths(target) {
