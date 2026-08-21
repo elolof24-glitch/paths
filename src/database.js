@@ -16,7 +16,8 @@ db.exec(`
     name TEXT NOT NULL UNIQUE,
     url TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_scan_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS paths (
@@ -51,20 +52,43 @@ export function disableTarget(name) {
 
 export function getTargets() {
   return db.prepare(`
-    SELECT id, name, url, enabled, created_at
+    SELECT id, name, url, enabled, created_at, last_scan_at
     FROM targets
     WHERE enabled = 1
     ORDER BY name
   `).all();
 }
 
-export function getStoredPaths(targetId) {
-  return db.prepare(`
+export function getStoredPaths(targetId, days = null) {
+  let query = `
     SELECT url, path, status, first_seen, last_seen
     FROM paths
     WHERE target_id = ?
-    ORDER BY path ASC
-  `).all(targetId);
+  `;
+  
+  const params = [targetId];
+  
+  if (days) {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    query += ` AND first_seen >= ?`;
+    params.push(cutoff.toISOString());
+  }
+  
+  query += ` ORDER BY path ASC`;
+  
+  return db.prepare(query).all(...params);
+}
+
+export function getNewPathsSinceLastScan(targetId) {
+  return db.prepare(`
+    SELECT url, path, status, first_seen, last_seen
+    FROM paths
+    WHERE target_id = ? AND first_seen > (
+      SELECT COALESCE(last_scan_at, '1970-01-01') FROM targets WHERE id = ?
+    )
+    ORDER BY first_seen DESC
+  `).all(targetId, targetId);
 }
 
 export function savePath({ targetId, url, path: pathname, status, contentHash }) {
@@ -110,4 +134,8 @@ export function removeUrlsByPattern(targetId, pattern) {
   const result = stmt.run(targetId, `%${pattern}%`);
   console.log(`[db] removed ${result.changes} URLs matching "${pattern}" from target ${targetId}`);
   return result.changes;
+}
+
+export function updateLastScan(targetId) {
+  db.prepare(`UPDATE targets SET last_scan_at = CURRENT_TIMESTAMP WHERE id = ?`).run(targetId);
 }
