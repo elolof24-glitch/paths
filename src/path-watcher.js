@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
 import { chromium } from 'playwright';
 import { savePath } from './database.js';
+import { fetchRobotsTxt } from './discovery/robots.js';
+import { fetchSitemaps } from './discovery/sitemaps.js';
+import { fetchCommonCrawl } from './discovery/commoncrawl.js';
+import { fetchWayback } from './discovery/wayback.js';
 
 const MAX_PAGES = 50;
 const MAX_URLS = 1000;
@@ -52,6 +56,34 @@ export async function scanPaths(target) {
     const baseUrl = target.url;
     const seeds = Array.isArray(target.seeds) ? target.seeds : [];
 
+    // === V2: Multi-source discovery ===
+    
+    // 1. robots.txt
+    const robotsUrls = await fetchRobotsTxt(baseUrl);
+    for (const url of robotsUrls) {
+      add(discovered, url, baseUrl);
+    }
+
+    // 2. sitemaps
+    const sitemapUrls = await fetchSitemaps(baseUrl);
+    for (const url of sitemapUrls) {
+      add(discovered, url, baseUrl);
+    }
+
+    // 3. Common Crawl
+    const ccUrls = await fetchCommonCrawl(baseUrl);
+    for (const url of ccUrls) {
+      add(discovered, url, baseUrl);
+    }
+
+    // 4. Wayback
+    const wbUrls = await fetchWayback(baseUrl);
+    for (const url of wbUrls) {
+      add(discovered, url, baseUrl);
+    }
+
+    // === Existing: seeds and crawling ===
+    
     add(discovered, baseUrl, baseUrl);
     queue.push(baseUrl);
 
